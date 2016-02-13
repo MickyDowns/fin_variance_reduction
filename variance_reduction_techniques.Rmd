@@ -1,0 +1,477 @@
+---
+title: "option pricing variance reduction"
+author: "michael downs"
+date: "November 18, 2015"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r eval=TRUE,cache=TRUE,echo=FALSE,message=FALSE,results='hide',warning=FALSE,fig.show='asis',fig.height=3.5,fig.width=5}
+library(xts)
+library(urca)
+library(quantmod)
+library(fUnitRoots)
+library(PerformanceAnalytics)
+library(highfrequency)
+library(fOptions)
+library(optimx)
+library(fExoticOptions)
+#library(timeSeries)
+#library(timeDate)
+
+#library(lubridate)
+#library(tseries)
+#library(TTR)
+#library(caret)
+#library(mondate)
+#library(MTS)
+#library(car)
+
+```
+
+## problem 1
+
+*Given $S_t = a(b−St)dt + \sigma d \omega t$, with $a=0.5$, $b=104$, $r=0.05$ ,$\sigma=0.1$,$T=1$, $S0=100$ and $K=105$, for each of (a) put option with strike K, (b) option with payoff $(K − S_T )_+ + (S_T − K)_+$, find the price of these options with and without using antithetic variates. Did you achieve variance reduction?*
+
+```{r eval=TRUE,cache=FALSE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# given 
+A=0.5; B=104; r=0.05; ttm=1; S0=100; K=105; delta.t=ttm/360; sigma=10
+
+# 1. functions for generating discretized paths
+## a. using uniform distribution
+dPathUnif=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     S1.vals=S0
+     if(!anti){rand.vars=runif(path.len)}else{tmp=runif(path.len/2);rand.vars=c(tmp,1-tmp)}
+     for(i in 1:path.len){
+          S1.vals[i+1]=S1.vals[i]+A*(B-S1.vals[i])*delta.t+sigma*sqrt(delta.t)*rand.vars[i]}
+     return(S1.vals)
+}
+
+## b. netting variables w/ rnorm
+dPathRnormNet=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     s.vals=sa.vals=S0     
+     for(i in 1:path.len){
+          s.vals[i+1]=s.vals[i]+A*(B-s.vals[i])*delta.t+sigma*sqrt(delta.t)*rnorm(1,0,1)
+          sa.vals[i+1]=sa.vals[i]+A*(B-sa.vals[i])*delta.t-sigma*sqrt(delta.t)*rnorm(1,0,1)
+     }
+     if(anti){return(cbind(s.vals,sa.vals))}
+     else{return(s.vals)}
+}
+## c. mirroring variables w/ rnorm
+dPathRnormMir=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     s.vals=sa.vals=S0
+     rand.vars=rnorm(path.len)
+     for(i in 1:path.len){
+          s.vals[i+1]=s.vals[i]+A*(B-s.vals[i])*delta.t+sigma*sqrt(delta.t)*rand.vars[i]
+          sa.vals[i+1]=sa.vals[i]+A*(B-sa.vals[i])*delta.t-sigma*sqrt(delta.t)*rand.vars[i]
+     }
+     if(anti){return(cbind(s.vals,sa.vals))}
+     else{return(s.vals)}
+}
+
+# 2. functions for pricing options
+## a. vanilla put using MC with and without antithetic variates
+vanillaPut=function(N,S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE,dis=NULL){
+     end.p=NULL
+     for(i in 1:N){
+          if(dis=="dPathUnif"){
+               s.dis=dPathUnif(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)
+               end.s=s.dis[length(s.dis)]
+               if(K>end.s){end.p[i]=K-end.s}else{end.p[i]=NA}
+          }
+          else{
+               if(dis=="dPathRnormNet"){s.dis=dPathRnormNet(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+               else{s.dis=dPathRnormMir(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+          
+               if(anti==FALSE){
+                    end.s=s.dis[length(s.dis)]
+                    if(K>end.s){end.p[i]=K-end.s}else{end.p[i]=NA}
+               } else{
+                    end.s1=s.dis[dim(s.dis)[1],1];end.s2=s.dis[dim(s.dis)[1],2]
+                    if(K>end.s1){end.p1=K-end.s1}else{end.p1=NA}
+                    if(K>end.s2){end.p2=K-end.s2}else{end.p2=NA}
+                    end.p[i]=mean(cbind(end.p1,end.p2))
+               }
+          }
+     }
+     return(end.p)
+}
+
+## b. combined put/call using MC w/ and w/out antithetic variates
+combPutCall=function(N,S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE,dis=NULL){
+     end.p=NULL
+     for(i in 1:N){
+          if(dis=="dPathUnif"){
+               s.dis=dPathUnif(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)
+               end.s=s.dis[length(s.dis)]
+               end.p[i]=max(end.s-K,K-end.s)#abs(end.s-K)
+          }
+          else{
+               if(dis=="dPathRnormNet"){s.dis=dPathRnormNet(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+               else{s.dis=dPathRnormMir(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+               
+               if(anti==FALSE){
+                    end.s=s.dis[length(s.dis)]
+                    end.p[i]=max(end.s-K,K-end.s) #abs(end.s-K)
+               }else{
+                    end.s1=s.dis[dim(s.dis)[1],1];end.s2=s.dis[dim(s.dis)[1],2]
+                    end.p1=max(end.s1-K,K-end.s1) #abs(end.s1-K)
+                    end.p2=max(end.s2-K,K-end.s2) #abs(end.s2-K)
+                    end.p[i]=mean(cbind(end.p1,end.p2))
+               }
+          }
+     }
+     return(end.p)
+}
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")}
+
+```
+
+Using $\sigma=10$, I show two methods for reducing variance using antithetic variates assuming a normal distribution. First, I show that using the normal distribution for random variables generation and their "antithetics" reduces variance \textbf{even when the antithetic is not not the exact opposite but instead another random normal number}. 
+
+Below, the \textbf{vanilla put} mean and variance \textbf{with} antithetic variates is followed by mean and variance \textbf{without}, followed by the \textbf{with} percent variance reduction over \textbf{without} ($N \approx 15,000$):
+
+```{r eval=TRUE,cache=FALSE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 3. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 4. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 5. processing N.ci iterations WITHOUT antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormNet")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+Normal distribution antithetic generation holds up for the \textbf{combined put/call}. Below, mean and variance \textbf{with} antithetic variates is followed by mean and variance \textbf{without}, followed by the \textbf{with} percent variance reduction over \textbf{without} ($N \approx 20,000$):
+
+```{r eval=TRUE,cache=TRUE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 6. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 7. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 8. processing N.ci iterations WITHOUT antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormNet")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+Second, the example below uses the normal distribution to generate random variables and \textbf{takes the negative variable values as the  antithetics}. This results in a discretized path for the underlying stock using antithetics that is the mirror image of the path using the original variables. Unfortunately, taking the mean of these mirror images rarely (if ever) results in \textbf{vanilla put} option values greater than $K$. However, the method can be used to value the \textbf{combined put / call}.
+
+```{r eval=FALSE,cache=FALSE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 9. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(1000,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2);N.ci
+
+# 10. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 11. processing N.ci iterations WITHOUT antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormMir")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+Below, the \textbf{combined put / call} mean and variance \textbf{with} antithetic variates is followed by the mean and variance \textbf{without}, followed by the \textbf{with} percent variance reduction over \textbf{without} ($N \approx 35,000$).
+
+```{r eval=TRUE,cache=TRUE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 12. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 13. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 14. processing N.ci iterations WITHOUT antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormMir")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+\textbf{comments:} 
+
+Note: variance can also be reduced using the uniform distribution for random number generation and using $1-U$ for the corresponding antethetic variate. Variance reduction below occurs with as little as $N=300$. Here \textbf{vanilla put} variance \textbf{with} antithetic variates is followed by variance \textbf{without}, followed by the \textbf{with} percent reduction over \textbf{without}:
+
+```{r eval=TRUE,cache=FALSE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 15. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(1000,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+sigma.ci=sd(end.p,na.rm=T);alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 16. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 17. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathUnif")
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+The variance reduction for the \textbf{combined put/call} using \textbf{uniform distribution} is equally impressive. Below, the variance \textbf{with} antithetic variates is followed by variance \textbf{without}, followed by the \textbf{with} percent reduction over \textbf{without}:
+
+```{r eval=TRUE,cache=TRUE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# 18. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,path.len=floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+sigma.ci=sd(end.p,na.rm=T);alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 19. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 20. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathUnif")
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
+
+Unfortunately, option price isn't meaningful in this situation as the all-positive uniform distribution leads to a monotonic increase in the underlying stock price. 
+
+```{r eval=TRUE,cache=TRUE,echo=FALSE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+par(mfrow=c(1,1))
+s.discret=dPathUnif(S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE)
+plot(s.discret,type="l",ylim=range(s.discret))
+
+```
+
+\textbf{code:}
+```{r eval=FALSE,cache=FALSE,echo=TRUE,message=FALSE,results='markup',warning=FALSE,fig.show='asis',fig.height=4,fig.width=7}
+
+# given 
+A=0.5; B=104; r=0.05; ttm=1; S0=100; K=105; delta.t=ttm/360; sigma=10
+
+# 1. functions for generating discretized paths
+## a. using uniform distribution
+dPathUnif=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     S1.vals=S0
+     if(!anti){rand.vars=runif(path.len)}else{tmp=runif(path.len/2);rand.vars=c(tmp,1-tmp)}
+     for(i in 1:path.len){
+          S1.vals[i+1]=S1.vals[i]+A*(B-S1.vals[i])*delta.t+sigma*sqrt(delta.t)*rand.vars[i]}
+     return(S1.vals)
+}
+
+## b. netting variables w/ rnorm
+dPathRnormNet=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     s.vals=sa.vals=S0     
+     for(i in 1:path.len){
+          s.vals[i+1]=s.vals[i]+A*(B-s.vals[i])*delta.t+sigma*sqrt(delta.t)*rnorm(1,0,1)
+          sa.vals[i+1]=sa.vals[i]+A*(B-sa.vals[i])*delta.t-sigma*sqrt(delta.t)*rnorm(1,0,1)
+     }
+     if(anti){return(cbind(s.vals,sa.vals))}
+     else{return(s.vals)}
+}
+## c. mirroring variables w/ rnorm
+dPathRnormMir=function(S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE){
+     s.vals=sa.vals=S0
+     rand.vars=rnorm(path.len)
+     for(i in 1:path.len){
+          s.vals[i+1]=s.vals[i]+A*(B-s.vals[i])*delta.t+sigma*sqrt(delta.t)*rand.vars[i]
+          sa.vals[i+1]=sa.vals[i]+A*(B-sa.vals[i])*delta.t-sigma*sqrt(delta.t)*rand.vars[i]
+     }
+     if(anti){return(cbind(s.vals,sa.vals))}
+     else{return(s.vals)}
+}
+
+# 2. functions for pricing options
+## a. vanilla put using MC with and without antithetic variates
+vanillaPut=function(N,S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE,dis=NULL){
+     end.p=NULL
+     for(i in 1:N){
+          if(dis=="dPathUnif"){
+               s.dis=dPathUnif(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)
+               end.s=s.dis[length(s.dis)]
+               if(K>end.s){end.p[i]=K-end.s}else{end.p[i]=NA}
+          }
+          else{
+               if(dis=="dPathRnormNet"){s.dis=dPathRnormNet(S0,A,B,sigma,path.len,
+                                                            ttm,delta.t,anti=anti)}
+               else{s.dis=dPathRnormMir(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+          
+               if(anti==FALSE){
+                    end.s=s.dis[length(s.dis)]
+                    if(K>end.s){end.p[i]=K-end.s}else{end.p[i]=NA}
+               } else{
+                    end.s1=s.dis[dim(s.dis)[1],1];end.s2=s.dis[dim(s.dis)[1],2]
+                    if(K>end.s1){end.p1=K-end.s1}else{end.p1=NA}
+                    if(K>end.s2){end.p2=K-end.s2}else{end.p2=NA}
+                    end.p[i]=mean(cbind(end.p1,end.p2))
+               }
+          }
+     }
+     return(end.p)
+}
+
+## b. combined put/call using MC w/ and w/out antithetic variates
+combPutCall=function(N,S0,A,B,sigma,path.len,ttm,delta.t,anti=FALSE,dis=NULL){
+     end.p=NULL
+     for(i in 1:N){
+          if(dis=="dPathUnif"){
+               s.dis=dPathUnif(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)
+               end.s=s.dis[length(s.dis)]
+               end.p[i]=abs(end.s-K)
+          }
+          else{
+               if(dis=="dPathRnormNet"){s.dis=dPathRnormNet(S0,A,B,sigma,path.len,
+                                                            ttm,delta.t,anti=anti)}
+               else{s.dis=dPathRnormMir(S0,A,B,sigma,path.len,ttm,delta.t,anti=anti)}
+               
+               if(anti==FALSE){
+                    end.s=s.dis[length(s.dis)]
+                    end.p[i]=abs(end.s-K)
+               }else{
+                    end.s1=s.dis[dim(s.dis)[1],1];end.s2=s.dis[dim(s.dis)[1],2]
+                    end.p1=abs(end.s1-K); end.p2=abs(end.s2-K)
+                    end.p[i]=mean(cbind(end.p1,end.p2))
+               }
+          }
+     }
+     return(end.p)
+}
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")}
+
+# 3. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 4. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 5. processing N.ci iterations WITHOUT antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormNet")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+# 6. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 7. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormNet")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 8. processing N.ci iterations WITHOUT antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormNet")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+# 9. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(1000,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2);N.ci
+
+# 10. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 11. processing N.ci iterations WITHOUT antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormMir")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+# 12. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+sigma.ci=sd(end.p,na.rm=T); alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 13. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathRnormMir")
+with.mn=mean(end.p,na.rm=T);with.mn
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 14. processing N.ci iterations WITHOUT antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathRnormMir")
+wout.mn=mean(end.p,na.rm=T);wout.mn
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+# 15. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=vanillaPut(100,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+sigma.ci=sd(end.p,na.rm=T);alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 16. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 17. processing N.ci iterations WITH antithetic pairs
+end.p=vanillaPut(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathUnif")
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+# 18. looping on sample to find sigma.ci and N.ci WITH antithetic pairs
+end.p=combPutCall(100,S0,A,B,sigma,path.len=floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+sigma.ci=sd(end.p,na.rm=T);alpha.ci=0.05
+N.ci=(sigma.ci^2/alpha.ci^2)*(qnorm(1-(alpha.ci/2))^2)
+
+# 19. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=TRUE,dis="dPathUnif")
+with.var=var(end.p,na.rm=T)/sqrt(N.ci);with.var
+
+# 20. processing N.ci iterations WITH antithetic pairs
+end.p=combPutCall(N.ci,S0,A,B,sigma,floor(ttm/delta.t),ttm,delta.t,anti=FALSE,dis="dPathUnif")
+wout.var=var(end.p,na.rm=T)/sqrt(N.ci);wout.var
+
+percent((wout.var-with.var)/wout.var)
+
+```
